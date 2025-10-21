@@ -1,0 +1,436 @@
+---
+title: "BC FIRE DATA ANALYSIS (Exploratory Data Analysis)"
+author: "Kari Bautista"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    number_sections: true
+header-includes:
+  - \usepackage{fancyhdr}  # optional, for nicer headers in PDF
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+#tinytex::install_tinytex()
+library(readr)
+library(maps)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(writexl)
+library(ggplot2)
+library(sf)
+
+```
+
+
+# **Introduction**
+
+**- Objective:**
+
+Perform an exploratory data analysis (EDA) on the BC Wildfire Dataset, focusing on variable classification, cleaning, missing value treatment, and statistical summaries.
+
+**- Dataset:**
+
+H_FIRE_PNT.csv: containing historical wildfire incidents with attributes such as time, location, and fire characteristics.
+
+
+# **Data import**
+```{r}
+Fires <- read_csv("FireForest Data/PROT_HISTORICAL_INCIDENTS_SP/H_FIRE_PNT.csv")
+View(Fires)
+```
+
+
+# **Variable Categorization**
+
+**- Categorical variables:** 
+
+Represent qualitative information (e.g., fire cause, region).
+
+**- Numerical variables:** 
+
+Represent quantitative measures (e.g., size, coordinates).
+
+**Identification Variables**
+
+```{r}
+sapply(Fires[c("FIRE_NO", "OBJECTID", "FIRE_ID")], class)
+```
+
+**Temporal Variables**
+
+```{r}
+sapply(Fires[c("FIRE_YEAR", "IGN_DATE", "FR_T_DTE")], class)
+```
+
+**Administrative & Geographic Variables**
+
+```{r}
+sapply(Fires[c("FRCNTR", "ZONE", "LONGITUDE", "LATITUDE", "X_COORDINATE", "Y_COORDINATE", "SHAPE")], class)
+```
+
+**Fire Characteristics**
+
+```{r}
+sapply(Fires[c("FIRE_CAUSE", "FIRE_TYPE", "SIZE_HA", "INCDNT_NM", "GEO_DESC", "RSPNS_TYPC", "FIRELABEL")], class)
+```
+
+## Description of Variables
+
+| **Variable**    | **Type**       | **Description** |
+|:----------------|:---------------|:----------------|
+| FIRE_NO         | Categorical    | Unique ID for each fire |
+| OBJECTID        | Categorical    | Label ID |
+| FIRE_ID         | Categorical    | System-generated ID within a fire year and center |
+| FIRE_YEAR       | Numerical      | Year of the fire |
+| IGN_DATE        | Date           | Fire ignition date |
+| FR_T_DTE        | Date           | Fire reporting or termination date |
+| FRCNTR          | Categorical    | BC Wildfire Service administrative area |
+| ZONE            | Categorical    | Subset of the administrative area |
+| LONGITUDE       | Categorical    | Geographic coordinate |
+| LATITUDE        | Categorical    | Geographic coordinate |
+| X_COORDINATE    | Categorical    | Spatial coordinate (qualitative) |
+| Y_COORDINATE    | Categorical    | Spatial coordinate (qualitative) |
+| SHAPE           | Categorical    | Defines spatial feature geometry |
+
+**Note:** According to the GIS Dictionary: "Coordinate systems are used to represent features at their actual location on the Earth's spherical surface." Therefore, they are treated as *qualitative* variables describing location. Meaning, they can take any value within a range but cannot be meaningfully divided or subtracted.
+
+
+# **Data Accuracy**
+
+In this step, it is important to check for the values out of range (if it is not within the value range, then it does not exist at all)
+
+With the function summary, we can view the ranges (min and max).
+
+```{r}
+summary(Fires)
+```
+
+We know that B.C. is divided into six fire centres: 
+
+- C: Cariboo Fire Center (7)
+
+- V: Coastal Fire Center (2)
+
+- K: Kamloops (5)
+
+- R: Northwest (3)
+
+- G: Prince George (4)
+
+- N: Southeast (6)
+
+Thus, the variable **FRCNTR**, should have values of 2,3,4,5,6,7 in the database. In the summary we can see this is true.
+
+**FIRE_YEAR** (1950 to 2023), **LATITUDE** (-90 to 90), **LONGITUDE** (-180 to 180), and **SIZE_HA** within valid ranges.
+
+For the columns that have dates as values (**IGN_DATE** and **FR_T_DATE**), we can see that they are not in the right format. For instance, in the column IGN_DATE, the first date is 20220912141105, the correct form should be 2022-09-12, These columns need to be reformatted into proper Date objects.
+
+```{r}
+Fires$IGN_DATE <- as.Date(as.character(as.numeric(Fires$IGN_DATE)), format = "%Y%m%d")
+Fires$FR_T_DTE <- as.Date(as.character(as.numeric(Fires$FR_T_DTE)), format = "%Y%m%d")
+summary(Fires) 
+```
+
+However, the summary shows that some values are clearly incorrect:
+
+- The maximum value for FR_T_DTE is 2047-09-06.
+
+- The minimum value for IGN_DATE is 1000-01-05.
+
+Let's correct these unrealistc dates:
+
+```{r}
+Fires[Fires == "1000-01-05"] <- as.Date("2022-01-05")
+Fires[Fires == "2047-09-06"] <- as.Date("2017-09-06")
+summary(Fires)
+```
+
+**Note:** The FR_T_DTE should always be more recent than the IGN_DATE, since a fire is first discovered (IGN_DATE) and then declared out (FR_T_DTE). However, there are 115 cases where FR_T_DTE occurs earlier than IGN_DATE, which is incorrect. I will address this issue later, once all missing data have been completed.
+
+
+# **Missing Data**
+
+Let's see the number of missing values in each variable:
+
+```{r}
+Fires[Fires == ""] <- NA
+colSums(is.na(Fires))
+```
+
+Next, we will examine the columns with the highest proportion of missing data. Any column with more than 30% missing values will be removed from the dataset.
+
+```{r}
+# Calculate % of missing values per column
+missing_df <- Fires %>%
+  summarise(across(everything(), ~mean(is.na(.))*100)) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "MissingPercent")
+
+# Plot
+ggplot(missing_df, aes(x = reorder(Variable, -MissingPercent), y = MissingPercent)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = sprintf("%.1f%%", MissingPercent)), vjust = -0.5, size = 3) +
+  labs(title = "Percentage of Missing Values by Variable",
+       x = "Variable",
+       y = "Missing (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Remove columns with >30% of missing values.
+
+```{r}
+Fires <- Fires %>% select(-RSPNS_TYPC, -INCDNT_NM, -GEO_DESC, -SHAPE)
+```
+
+I assume that the missing values in these columns may be due to issues in data storage, data loss, or deletion. I believe this represents a case of Missing Not at Random (MNAR). In other words, the missing values are associated with events or conditions that were not captured or measured by the researcher.
+
+**Variable: FR_T_DTE**
+
+- Missing values: 18,292 (9.41%)
+
+To impute this, I ask the question: How many days does it take the fire to shut down?
+
+For this, it is necessary to get the difference of days and estimate the average fire duration:
+
+```{r}
+Fires$Diff <- Fires$FR_T_DTE - Fires$IGN_DATE
+mean(as.numeric(Fires$Diff), na.rm = TRUE)
+```
+
+In average, it takes 5.28 days for the fire to stop.
+
+Impute Missing Dates with the average duration
+
+```{r}
+Fires <- Fires %>%
+mutate(FR_T_DTE = ifelse(is.na(FR_T_DTE),
+IGN_DATE + as.difftime(5, units = "days"),
+FR_T_DTE)) %>%
+mutate(FR_T_DTE = as.Date(FR_T_DTE))
+colSums(is.na(Fires))
+```
+
+However, there are still 1,773 values missing, the previous step did not work for all missing values, because the data doesn't have any values in the column FR_T_DTE and IGN_DATE.
+
+To resolve this issue, I will get which month had the most fires:
+```{r}
+# Extract month from FR_T_DTE
+Fires$month <- month(Fires$FR_T_DTE)
+
+# Remove missing months
+months_no_na <- na.omit(Fires$month)
+
+# Define mode function
+getmode <- function(x) {
+  uniqv <- unique(x)
+  uniqv[which.max(tabulate(match(x, uniqv)))]
+}
+
+# Find the month with the most fires
+modemonth <- getmode(months_no_na)
+print(modemonth)
+```
+
+The month with the most fires was August.
+
+For the missing values, we will replace them with the mode, August, while taking into account the year of the fire.
+
+```{r}
+Fires$FR_T_DTE[is.na(Fires$FR_T_DTE)] <- as.Date(paste0(Fires$FIRE_YEAR[is.na(Fires$FR_T_DTE)], "-08-01"))
+```
+
+**Variable: IGN_DTE**
+
+- Missing values: 7,522 (3.87%)
+
+Previously, it was calculated the average days for the fire to shut down (5 days). With the same logic, any missing values on this variable will be replace by the data when the fire stops minus the 5 days.
+
+```{r}
+Fires$IGN_DATE[is.na(Fires$IGN_DATE)] <- Fires$FR_T_DTE[is.na(Fires$IGN_DATE)] - 5
+Fires$IGN_DATE <- as.Date(Fires$IGN_DATE)
+colSums(is.na(Fires))
+```
+
+There was an observation previously said: there are values where FR_T_DTE is older than IGN_DATE, those values are wrong. Now, that the data does not have missing values on both columns, let's identify the incorrect ones.
+
+We correct the data switching both columns:
+
+```{r}
+Fires <- Fires %>%
+mutate(
+IGN_DATE = if_else(IGN_DATE > FR_T_DTE, FR_T_DTE, IGN_DATE),
+FR_T_DTE = if_else(IGN_DATE > FR_T_DTE, IGN_DATE, FR_T_DTE)
+)
+```
+
+**Variable: FRCNTR**
+
+- Missing values:29 (0.015%)
+
+Impute it with the mode:
+
+```{r}
+Fires$FRCNTR[is.na(Fires$FRCNTR)] <- getmode(na.omit(Fires$FRCNTR))
+```
+
+**Variable: ZONE**
+
+- Missing values:29 (0.015%)
+
+Impute it with the mode as well:
+
+```{r}
+Fires$ZONE[is.na(Fires$ZONE)] <- getmode(na.omit(Fires$ZONE))
+```
+
+
+**Variable: SIZE**
+
+- Missing values: 11,900 (6.12%)
+
+Impute it with the mean:
+
+```{r}
+Fires$SIZE_HA[is.na(Fires$SIZE_HA)] <- mean(Fires$SIZE_HA, na.rm = TRUE)
+colSums(is.na(Fires))
+```
+
+At this point, the original dataset no longer contains any missing values. Any missing values that appear are in columns created during the process of correcting missing data.
+
+
+# **Outliers**
+
+In this section, we examine the outliers among the numerical (continuous) variables. In our dataset, we have only one notable outlier: the size of the fire measured in hectares.
+
+```{r}
+ggplot(Fires, aes(y = SIZE_HA)) +
+  geom_boxplot(fill = "tomato", color = "black", outlier.color = "blue", outlier.shape = 16, outlier.size = 2) +
+  labs(
+    title = "Distribution of Fire Size (Hectares)",
+    y = "Size (Hectares)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title.x = element_blank()
+  )
+```
+
+```{r}
+summary(Fires$SIZE_HA)
+```
+
+
+# **Qualitative analysis**
+
+## B.C. Map
+
+Let' see the map, where most of the fires were located
+
+```{r}
+Fires_clean <- Fires %>%
+  mutate(
+    LONGITUDE = as.numeric(LONGITUDE),
+    LATITUDE = as.numeric(LATITUDE)
+  ) %>%
+  filter(!is.na(LONGITUDE) & !is.na(LATITUDE))
+
+# Get map data for Canada
+canada_map <- map_data("world") %>% filter(region == "Canada")
+
+# Plot BC fires
+ggplot() +
+  geom_polygon(data = canada_map, aes(x = long, y = lat, group = group),
+               fill = "lightgray", color = "black") +
+  geom_point(data = Fires_clean, aes(x = LONGITUDE, y = LATITUDE),
+             color = "red", alpha = 0.6, size = 1.5) +
+  coord_fixed(1.3, xlim = c(-140, -110), ylim = c(48, 60)) + # approximate BC bounds
+  labs(title = "Fire Locations in British Columbia",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+## Fire Frequency by Month (Last 3 Years)
+
+```{r}
+# Ensure IGN_DATE is Date type
+Fires <- Fires %>%
+  mutate(IGN_DATE = as.Date(IGN_DATE, origin = "1970-01-01"))  # adjust if needed
+
+# Get the last 3 years based on FIRE_YEAR
+latest_year <- max(Fires$FIRE_YEAR, na.rm = TRUE)
+last_3_years <- (latest_year-2):latest_year
+
+# Filter and create month column
+Fires_recent <- Fires %>%
+  filter(FIRE_YEAR %in% last_3_years) %>%
+  mutate(month = month(IGN_DATE, label = TRUE, abbr = FALSE))
+
+# Count fires per month
+fires_per_month <- Fires_recent %>%
+  filter(!is.na(month)) %>%
+  group_by(month) %>%
+  summarise(fire_count = n()) %>%
+  arrange(fire_count)
+
+# Plot
+ggplot(fires_per_month, aes(x = month, y = fire_count)) +
+  geom_bar(stat = "identity", fill = "forestgreen") +
+  geom_text(aes(label = fire_count), vjust = -0.5, size = 3) +
+  labs(
+    title = paste("Number of Fires by Month (Last 3 Years:", paste(last_3_years, collapse = ", "), ")"),
+    x = "Month",
+    y = "Number of Fires"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The months with the most fires are July and August, which makes sense as these are typically the warmest months of the year.
+
+## Fire Origin
+
+```{r}
+# Calculate percentages by FIRE_CAUSE
+fire_cause_pct <- Fires %>%
+  filter(!is.na(FIRE_CAUSE)) %>%
+  group_by(FIRE_CAUSE) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Plot as a circular graph (pie chart)
+ggplot(fire_cause_pct, aes(x = "", y = percentage, fill = FIRE_CAUSE)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")),
+            position = position_stack(vjust = 0.5), size = 3) +
+  labs(
+    title = "Distribution of Fire Causes",
+    fill = "Fire Cause"
+  ) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+```
+
+About one-third of the fires were caused by human activity, indicating that a significant portion of these fires could have been prevented.
+
+
+# **Limitations**
+
+A limitation of the dataset is the potential duplication of fire records, which could lead to overcounting in the analysis. Since the data entry relies on satellite information, which may report the same fire multiple times, a single fire might be recorded more than once.
